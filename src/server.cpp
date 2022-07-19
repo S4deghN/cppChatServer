@@ -1,8 +1,9 @@
 #include <boost/asio.hpp>
+#include <functional>
+#include <iostream>
 #include <optional>
 #include <queue>
 #include <unordered_set>
-#include <iostream>
 
 namespace io = boost::asio;
 using tcp = io::ip::tcp;
