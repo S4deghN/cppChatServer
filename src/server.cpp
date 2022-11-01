@@ -1,3 +1,8 @@
+#include <fmt/core.h>
+#include <fmt/ostream.h>
+#include <fmt/ranges.h>
+
+#include <array>
 #include <boost/asio.hpp>
 #include <functional>
 #include <iostream>
@@ -7,117 +12,121 @@
 
 namespace io = boost::asio;
 using tcp = io::ip::tcp;
-using error_code = boost::system::error_code;
-using namespace std::placeholders;
+using ec = boost::system::error_code;
+using fmt::print;
 
-using message_handler = std::function<void(std::string)>;
-using error_handler = std::function<void()>;
+class Room {};
 
-class session : public std::enable_shared_from_this<session> {
+class Session {
+    using error_handler = std::function<void()>;
+    using msg_handler = std::function<void(std::string&&)>;
+
 public:
-    session(tcp::socket&& socket) : socket(std::move(socket)) {}
+    explicit Session(tcp::socket&& socket) : socket_(std::move(socket)) {}
 
-    void start(message_handler&& on_message, error_handler&& on_error) {
-        this->on_message = std::move(on_message);
-        this->on_error = std::move(on_error);
-        async_read();
+    void init(msg_handler&& on_msg, error_handler&& on_error) {
+        on_error_ = on_error;
+        on_msg_ = on_msg;
+        do_read();
     }
 
-    void post(std::string const& message) {
-        bool idle = outgoing.empty();
-        outgoing.push(message);
+    void do_read() {
+        io::async_read_until(socket_, io::dynamic_buffer(read_data_, 512), '\n',
+                             [&](ec e, std::size_t n) {
+                                 if (!e) {
+                                     print("{} bytes: {}\n", n, read_data_);
+                                     on_msg_(std::move(read_data_));
+                                     do_read();
+                                 } else {
+                                     socket_.close();
+                                     print("err in do_read: {}\n", e.what());
+                                     on_error_();
+                                 }
+                             });
+    }
+
+    void post_msg(const std::string& msg) {
+        bool idle = msg_list_.empty();
+        msg_list_.push_back(msg);
 
         if (idle) {
-            async_write();
+            do_write();
         }
     }
 
-private:
-    void async_read() {
-        io::async_read_until(socket, streambuf, "\n",
-                             std::bind(&session::on_read, shared_from_this(), _1, _2));
-    }
+    void do_write() {
+        io::async_write(socket_, io::buffer(msg_list_.front()), [&](ec e, std::size_t n) {
+            if (!e) {
+                msg_list_.pop_front();
 
-    void on_read(error_code error, std::size_t bytes_transferred) {
-        if (!error) {
-            std::stringstream message;
-            message << socket.remote_endpoint(error) << ": " << std::istream(&streambuf).rdbuf();
-            streambuf.consume(bytes_transferred);
-            on_message(message.str());
-            async_read();
-        } else {
-            socket.close(error);
-            on_error();
-        }
-    }
-
-    void async_write() {
-        io::async_write(socket, io::buffer(outgoing.front()),
-                        std::bind(&session::on_write, shared_from_this(), _1, _2));
-    }
-
-    void on_write(error_code error, std::size_t bytes_transferred) {
-        if (!error) {
-            outgoing.pop();
-
-            if (!outgoing.empty()) {
-                async_write();
-            }
-        } else {
-            socket.close(error);
-            on_error();
-        }
-    }
-
-    tcp::socket socket;
-    io::streambuf streambuf;
-    std::queue<std::string> outgoing;
-    message_handler on_message;
-    error_handler on_error;
-};
-
-class server {
-public:
-    server(io::io_context& io_context, std::uint16_t port)
-        : io_context(io_context), acceptor(io_context, tcp::endpoint(tcp::v4(), port)) {}
-
-    void async_accept() {
-        socket.emplace(io_context);
-
-        acceptor.async_accept(*socket, [&](error_code error) {
-            auto client = std::make_shared<session>(std::move(*socket));
-            client->post("Welcome to chat\n\r");
-            post("We have a newcomer\n\r");
-
-            clients.insert(client);
-
-            client->start(std::bind(&server::post, this, _1), [&, weak = std::weak_ptr(client)] {
-                if (auto shared = weak.lock(); shared && clients.erase(shared)) {
-                    post("We are one less\n\r");
+                if (!msg_list_.empty()) {
+                    do_write();
                 }
-            });
-
-            async_accept();
+            } else {
+                socket_.close();
+                print("err in do_write: {}\n", e.what());
+                on_error_();
+            }
         });
     }
 
-    void post(std::string const& message) {
-        for (auto& client : clients) {
-            client->post(message);
+private:
+    tcp::socket socket_;
+    std::string read_data_;
+    error_handler on_error_;
+    msg_handler on_msg_;
+    std::deque<std::string> msg_list_;
+};
+
+class Server {
+public:
+    Server(io::io_context& context, tcp::endpoint&& endpoint)
+        : context_(context), acceptor_(context, endpoint) {
+        print("server constructed. endpoint: {}\n", endpoint.port());
+    }
+
+    void do_accept() {
+        acceptor_.async_accept([&](ec e, tcp::socket socket) {
+            if (!e) {
+                auto session = std::make_shared<Session>(std::move(socket));
+
+                session->init([&](std::string msg) { this->deliver_msg(msg); },
+                              [&, weak = std::weak_ptr(session)] {
+                                  if (auto shared = weak.lock(); shared) {
+                                      sessions_.erase(shared);
+                                      print("We are one less\n");
+                                  }
+                              });
+
+                sessions_.emplace(std::move(session));
+
+                this->do_accept();
+            } else {
+                print("err in acceptor: {}", e.what());
+            }
+        });
+    }
+
+    void deliver_msg(const std::string& msg) {
+        for (const auto& session : sessions_) {
+            session->post_msg(msg);
         }
     }
 
 private:
-    io::io_context& io_context;
-    tcp::acceptor acceptor;
-    std::optional<tcp::socket> socket;
-    std::unordered_set<std::shared_ptr<session>> clients;
+    io::io_context& context_;
+    tcp::acceptor acceptor_;
+    std::unordered_set<std::shared_ptr<Session>> sessions_;
+    std::vector<std::string> msg_;
 };
 
 int main() {
-    io::io_context io_context;
-    server srv(io_context, 15001);
-    srv.async_accept();
+    int thread_count = std::thread::hardware_concurrency() * 2;
+
+    io::io_context io_context(2);
+    Server srv(io_context, tcp::endpoint(tcp::v4(), 55555));
+    srv.do_accept();
     io_context.run();
+
     return 0;
 }
