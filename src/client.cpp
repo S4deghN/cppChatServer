@@ -2,18 +2,16 @@
     #define _LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS
 #endif
 
-#include <coroutine>
+#include <spdlog/spdlog.h>
 #include <unistd.h>
-#include <iostream>
 
 #include <boost/asio.hpp>
+#include <coroutine>
+#include <iostream>
 
 namespace io = boost::asio;
-// namespace log = boost::log;
 using tcp = io::ip::tcp;
 using ec = boost::system::error_code;
-
-// #define log(a) BOOST_LOG_TRIVIAL(a)
 
 class Client {
 private:
@@ -36,7 +34,7 @@ public:
     io::awaitable<void> connect() {
         auto [err] = co_await socket.async_connect(endpoint, io::as_tuple(io::use_awaitable));
         if (err) {
-            // log(error) << err.what();
+            spdlog::error("connect: {}", err.what());
             co_return;
         }
 
@@ -50,11 +48,10 @@ public:
                 input_descriptor, io::dynamic_buffer(read_buff), '\n',
                 io::as_tuple(io::use_awaitable));
             if (err) {
-                // log(error) << "do_read_stdio: " << err.what();
+                spdlog::error("do_read_stdio: {}", err.what());
                 co_return;
             }
 
-            // log(info) << "input: " << read_buff.substr(0, n - 1);
             co_spawn(io_context, write_socket(std::move(read_buff)), io::detached);
         }
     }
@@ -63,7 +60,7 @@ public:
         auto [err, n] = co_await io::async_write(output_descriptor, io::buffer(msg),
                                                  io::as_tuple(io::use_awaitable));
         if (err) {
-            // log(error) << "write_stdio: " << err.what();
+            spdlog::error("write_stdio: {}", err.what());
             co_return;
         }
     }
@@ -73,12 +70,12 @@ public:
             auto [err, n] = co_await io::async_read_until(
                 socket, io::dynamic_buffer(read_buff, 512), '\n', io::as_tuple(io::use_awaitable));
             if (err) {
-                // log(error) << "do_read_socket: " << err.what();
+                spdlog::error("do_read_socket: {}", err.what());
                 terminate();
                 co_return;
             }
 
-            // log(info) << n << " bytes: " << read_buff;
+            spdlog::info("{} bytes: {}", n, read_buff.substr(0, n - 1));
             co_spawn(io_context, write_stdio(std::move(read_buff)), io::detached);
         }
     }
@@ -87,7 +84,7 @@ public:
         auto [err, n] =
             co_await io::async_write(socket, io::buffer(msg), io::as_tuple(io::use_awaitable));
         if (err) {
-            // log(error) << "write_socket: " << err.what();
+            spdlog::error("write_socket: {}", err.what());
             terminate();
             co_return;
         }
@@ -96,24 +93,12 @@ public:
     void terminate() {
         socket.close();
         io_context.stop();
-        // log(error) << "connection close due to an error!";
+        spdlog::error("Connection closed due to an error!");
     }
 };
 
-void init_logger() {
-    // log::core::get()->set_filter(log::trivial::severity >= log::trivial::info);
-    // log::add_common_attributes();
-    // log::formatter formatter =
-    //     log::expressions::stream
-    //     << "["
-    //     << log::expressions::format_date_time<boost::posix_time::ptime>("TimeStamp", "%H:%M:%S:%f")
-    //     << "] ["
-    //     << log::trivial::severity << "] " << log::expressions::message;
-    // log::add_console_log()->set_formatter(formatter);
-}
-
 int main() {
-    init_logger();
+    spdlog::set_pattern("[%H:%M:%S:%f] [%^%l%$]\t%v");
 
     io::io_context io_context;
     Client client(io_context, tcp::socket(io_context), tcp::endpoint(tcp::v4(), 55555));

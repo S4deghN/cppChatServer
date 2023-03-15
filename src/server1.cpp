@@ -2,19 +2,16 @@
     #define _LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS
 #endif
 
+#include <spdlog/spdlog.h>
+
+#include <boost/asio.hpp>
 #include <coroutine>
 #include <mutex>
 #include <thread>
 #include <unordered_set>
 
-#include <boost/asio.hpp>
-
 namespace io = boost::asio;
-// namespace log = boost::log;
 using tcp = io::ip::tcp;
-using ec = boost::system::error_code;
-
-// #define log(a) BOOST_LOG_TRIVIAL(a)
 
 class Session;
 using Session_ptr = std::shared_ptr<Session>;
@@ -37,12 +34,12 @@ public:
             auto [err, n] = co_await io::async_read_until(
                 socket, io::dynamic_buffer(read_buff, 512), '\n', io::as_tuple(io::use_awaitable));
             if (err) {
-                // log(error) << "do_read: " << err.what();
+                spdlog::error("do_read: {}", err.what());
                 close();
                 co_return;
             }
 
-            // log(info) << n << " bytes: " << read_buff.substr(0, n - 1);
+            spdlog::info("{} bytes: {}", n, read_buff.substr(0, n - 1));
             post_msg(std::move(read_buff));
         }
     }
@@ -51,7 +48,7 @@ public:
         auto [err, n] =
             co_await io::async_write(socket, io::buffer(msg), io::as_tuple(io::use_awaitable));
         if (err) {
-            // log(error) << "do_write: " << err.what();
+            spdlog::error("write: {}", err.what());
             close();
             co_return;
         }
@@ -72,12 +69,9 @@ public:
     }
 };
 
-io::awaitable<void> do_accept(io::io_context& io_context, tcp::endpoint&& endpoint,
-                              std::unordered_set<Session_ptr>& sessions) {
-    tcp::acceptor acceptor(io_context, endpoint);
-
+io::awaitable<void> do_accept(tcp::acceptor& acceptor, std::unordered_set<Session_ptr>& sessions) {
     for (;;) {
-        // log(info) << "sessions: " << sessions.size();
+        spdlog::info("Sessions : {}", sessions.size());
         auto session =
             std::make_shared<Session>(co_await acceptor.async_accept(io::use_awaitable), sessions);
         {
@@ -88,41 +82,31 @@ io::awaitable<void> do_accept(io::io_context& io_context, tcp::endpoint&& endpoi
 }
 
 void init_logger() {
-    // log::core::get()->set_filter(log::trivial::severity >= log::trivial::info);
-    // log::add_common_attributes();
-    // log::formatter formatter =
-    //     log::expressions::stream
-    //     << "["
-    //     << log::expressions::format_date_time<boost::posix_time::ptime>("TimeStamp", "%H:%M:%S:%f")
-    //     << "] ["
-    //     << log::expressions::attr<log::attributes::current_thread_id::value_type>("ThreadID")
-    //     << "] [" << log::trivial::severity << "] " << log::expressions::message;
-    // log::add_console_log()->set_formatter(formatter);
 }
 
 int main() {
-    init_logger();
+    spdlog::set_pattern("[%H:%M:%S:%f] [%t] [%^%l%$]\t%v");
 
-    std::unordered_set<Session_ptr> sessions;
     io::io_context io_context(16);
+    std::unordered_set<Session_ptr> sessions;
+    tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), 55555));
 
-    co_spawn(io_context, do_accept(io_context, tcp::endpoint(tcp::v4(), 55555), sessions),
-             io::detached);
+    co_spawn(io_context, do_accept(acceptor, sessions), io::detached);
 
-    io_context.run();
-    // auto count = 16;
-    // std::cout << count << " threads\n";
-    // std::vector<std::thread> threads;
+    // io_context.run();
+    auto count = 16;
+    std::vector<std::thread> threads;
+    spdlog::info("Threads: {}", count);
 
-    // for (unsigned int n = 0; n < count; ++n) {
-    //     threads.emplace_back([&] { io_context.run(); });
-    // }
+    for (unsigned int n = 0; n < count; ++n) {
+        threads.emplace_back([&] { io_context.run(); });
+    }
 
-    // for (auto& thread : threads) {
-    //     if (thread.joinable()) {
-    //         thread.join();
-    //     }
-    // }
+    for (auto& thread : threads) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
 
     return 0;
 }
