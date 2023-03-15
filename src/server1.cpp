@@ -19,6 +19,61 @@ class Session;
 using Session_ptr = std::shared_ptr<Session>;
 std::mutex sessions_mutex;
 
+class Server {
+private:
+    io::io_context io_context;
+    tcp::acceptor acceptor;
+    std::unordered_set<Session_ptr> sessions;
+    std::vector<std::thread> thr_vec;
+    io::ssl::context ssl_context;
+
+public:
+    Server(int threads, tcp::endpoint&& endpoint)
+        : io_context(threads),
+          ssl_context(io::ssl::context::sslv23_server),
+          acceptor(this->io_context, std::move(endpoint)) {
+        init_ssl();
+
+        co_spawn(io_context, do_accept(acceptor), io::detached);
+
+        spdlog::info("Threads: {}", threads);
+        for (unsigned int n = 0; n < threads; ++n) {
+            thr_vec.emplace_back([&] { io_context.run(); });
+        }
+        for (auto& thread : thr_vec) {
+            if (thread.joinable()) {
+                thread.join();
+            }
+        }
+    }
+
+    void init_ssl() {
+        try {
+            ssl_context.set_options(io::ssl::context::default_workarounds |
+                                    io::ssl::context::sslv23 | io::ssl::context::no_sslv2);
+            ssl_context.use_certificate_chain_file("cipher.pem");
+            ssl_context.use_private_key_file("key.pem", io::ssl::context::pem);
+        } catch (boost::system::error_code ec) {
+            spdlog::error(ec.what());
+        }
+    }
+
+    io::awaitable<void> do_accept(tcp::acceptor& acceptor) {
+        spdlog::info("Accepting connection on: {}:{}",
+                     acceptor.local_endpoint().address().to_string(),
+                     acceptor.local_endpoint().port());
+        for (;;) {
+            spdlog::info("Sessions : {}", sessions.size());
+            auto session = std::make_shared<Session>(
+                co_await acceptor.async_accept(io::use_awaitable), ssl_context, sessions);
+            {
+                std::lock_guard<std::mutex> guard(sessions_mutex);
+                sessions.emplace(std::move(session));
+            }
+        }
+    }
+};
+
 class Session : public std::enable_shared_from_this<Session> {
 private:
     tcp::socket socket;
@@ -91,56 +146,10 @@ public:
     }
 };
 
-io::awaitable<void> do_accept(tcp::acceptor& acceptor, std::unordered_set<Session_ptr>& sessions) {
-    io::ssl::context ssl_context(io::ssl::context::sslv23_server);
-    try {
-        ssl_context.set_options(io::ssl::context::default_workarounds | io::ssl::context::sslv23 |
-                                io::ssl::context::no_sslv2);
-        ssl_context.use_certificate_chain_file("cipher.pem");
-        ssl_context.use_private_key_file("key.pem", io::ssl::context::pem);
-    } catch (boost::system::error_code ec) {
-        spdlog::error(ec.what());
-        co_return;
-    }
-
-    for (;;) {
-        spdlog::info("Sessions : {}", sessions.size());
-        auto session = std::make_shared<Session>(co_await acceptor.async_accept(io::use_awaitable),
-                                                 ssl_context, sessions);
-        {
-            std::lock_guard<std::mutex> guard(sessions_mutex);
-            sessions.emplace(std::move(session));
-        }
-    }
-}
-
-void init_logger() {
-}
-
 int main() {
     spdlog::set_pattern("[%H:%M:%S:%f] [%t] [%^%l%$]\t%v");
 
-    io::io_context io_context(16);
-
-    std::unordered_set<Session_ptr> sessions;
-    tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), 55555));
-
-    co_spawn(io_context, do_accept(acceptor, sessions), io::detached);
-
-    // io_context.run();
-    auto count = 16;
-    std::vector<std::thread> threads;
-    spdlog::info("Threads: {}", count);
-
-    for (unsigned int n = 0; n < count; ++n) {
-        threads.emplace_back([&] { io_context.run(); });
-    }
-
-    for (auto& thread : threads) {
-        if (thread.joinable()) {
-            thread.join();
-        }
-    }
+    Server server(16, tcp::endpoint(tcp::v4(), 55555));
 
     return 0;
 }

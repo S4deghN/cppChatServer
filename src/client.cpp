@@ -1,3 +1,5 @@
+#include <chrono>
+#include <ctime>
 #if defined(__clang__)
     #define _LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS
 #endif
@@ -7,12 +9,41 @@
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
+#include <chrono>
 #include <coroutine>
+#include <ctime>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
+#include <string>
 
 namespace io = boost::asio;
 using tcp = io::ip::tcp;
 using ssl_socket = io::ssl::stream<tcp::socket&>;
+
+std::string time_in_string() {
+    using namespace std::chrono;
+
+    // get current time
+    auto now = system_clock::now();
+
+    // get number of milliseconds for the current second
+    // (remainder after division into seconds)
+    auto ms = duration_cast<microseconds>(now.time_since_epoch()) % 1000000;
+
+    // convert to std::time_t in order to convert to std::tm (broken time)
+    auto timer = system_clock::to_time_t(now);
+
+    // convert to broken time
+    std::tm bt = *std::localtime(&timer);
+
+    std::ostringstream oss;
+
+    oss << std::put_time(&bt, "%H:%M:%S");  // HH:MM:SS
+    oss << '.' << std::setfill('0') << std::setw(6) << ms.count();
+
+    return oss.str();
+}
 
 class Client {
 private:
@@ -54,6 +85,7 @@ public:
             spdlog::error("handshake: {}", err.what());
         }
 
+        spdlog::info("Connected!");
         co_spawn(io_context, do_read_stdio(), io::detached);
         co_spawn(io_context, do_read_socket(), io::detached);
     }
@@ -73,7 +105,12 @@ public:
     }
 
     io::awaitable<void> write_stdio(std::string msg) {
-        auto [err, n] = co_await io::async_write(output_descriptor, io::buffer(msg),
+
+        std::string str = time_in_string();
+        str.append(": ");
+        str.append(msg);
+
+        auto [err, n] = co_await io::async_write(output_descriptor, io::buffer(str),
                                                  io::as_tuple(io::use_awaitable));
         if (err) {
             spdlog::error("write_stdio: {}", err.what());
@@ -116,7 +153,7 @@ public:
 
 int main() {
     spdlog::set_pattern("[%H:%M:%S:%f] [%^%l%$]\t%v");
-    spdlog::info("something");
+    spdlog::set_level(spdlog::level::err);
 
     io::io_context io_context;
     io::ssl::context ssl_context(io::ssl::context::sslv23_client);
