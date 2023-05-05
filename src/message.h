@@ -1,173 +1,186 @@
 #pragma once
-// #ifndef MESSAGE_H
-// #define MESSAGE_H
 
 //
-// Message::data -> 0000000000000000000000000000000000000... (teminates with '\n')
+// Message::data -> 0000000000000000000000000000000000000...'\n'
 //                  | Message::header() | Message::body()
 
 #define MAX_MESSAGE_SIZE 256
 
-enum class MessageType : uint8_t {
-    login = 65,
-    text
+enum class MessageErrorCode : uint8_t {
+    no_error,
+    successful_login,
+    not_logged_in,
+    already_logged_in
 };
 
-struct Message {
-    typedef char DataType;
+enum class MessageType : uint8_t {
+    login = 65,
+    text,
+    err
+};
 
+class Message : public std::basic_string<char> {
+public:
     struct Header {
         MessageType type;
         // more useful fields ...
     };
 
-    std::vector<DataType> data;
-
-    Message::Header* header_pointer() {
-        if (data.size() < sizeof(Header)) {
-            return nullptr;
-        }
-
-        return (Header*)data.data();
+    Header* const header_pointer() const {
+        return (Header* const)this->data();
     }
 
-    auto header() {
+    Header header() const {
         return *header_pointer();
     }
 
-    auto set_header(Header header) {
+    void set_header(Header const& header) {
+        if (this->size() < sizeof(Header)) {
+            this->resize(sizeof(Header));
+        }
+
         *header_pointer() = header;
     }
 
-    auto type() {
+    MessageType type() const {
         return header_pointer()->type;
     }
 
-    auto set_type(MessageType type) {
-        header_pointer()->type = type;
+    char* body() {
+        return this->data() + sizeof(Header);
     }
 
-    auto body() {
-        return data.data() + sizeof(Header);
+    size_t body_size() const {
+        return this->size() - sizeof(Header);
     }
 
-    auto body_size() {
-        // If the division result had reminder we had to manage that and write
-        // (int)((float)sizeof(Header) / sizeof(DataType) + 0.5)
-        // but for now since the DataType is static and of size 1, we have no
-        // problem
-        return data.size() - sizeof(Header) / sizeof(DataType);
+    auto body_view() {
+        return std::string_view(body(), body_size());
     }
 
-    auto set_body(DataType const* d, size_t s) {
-        if (s > MAX_MESSAGE_SIZE) {
-            return 1;
-        }
-
-        data.resize(sizeof(Header) + s);
-        memcpy(body(), d, s);
+    int set_body(std::basic_string_view<char> const& view) {
+        this->resize(sizeof(Header) + view.size());
+        memcpy(body(), view.data(), view.size());
         return 0;
     }
 
-    auto append_body(DataType const* d, size_t s) {
-        if (data.size() + s > MAX_MESSAGE_SIZE) {
+    int append_body(std::basic_string_view<char> const& view) {
+        if (this->size() + view.size() > MAX_MESSAGE_SIZE) {
             return 1;
         }
 
-        data.resize(sizeof(Header) + data.size() + s);
-        memcpy(body() + data.size(), d, s);
+        this->resize(sizeof(Header) + body_size() + view.size());
+        memcpy(body() + this->size(), view.data(), view.size());
         return 0;
     }
 };
 
 // struct Message {
-//     enum class Type : uint8_t {
-//         login = 65,
-//         text
+//     struct Header {
+//         MessageType type;
+//         // more useful fields ...
 //     };
 
-//     Type* type = (Type*)data;
-//     uint8_t* body = data + sizeof(Type);
+//     // TODO: use a vector of POD type with some modificatin to member functions
+//     std::basic_string<char> data;
 
-//     uint8_t data[256] = {0};
-
-//     void set_type(Type t) {
-//         *type = t;
+//     Message()
+//         : data(sizeof(Header), 0) {
+//     }
+//     Message(size_t size)
+//         : data(size, 0) {
+//     }
+//     Message(Header&& header)
+//         : data(sizeof(Header), 0) {
+//         set_header(header);
+//     }
+//     Message(Header&& header, std::basic_string_view<char> body)
+//         : data(sizeof(Header) + body.size(), 0) {
+//         set_header(header);
+//         memcpy(this->body(), body.data(), body.size());
+//     }
+//     Message(std::basic_string<char> const& string) {
+//         data = string;
+//     }
+//     Message(std::basic_string_view<char> const& string) {
+//         data = string;
 //     }
 
-//     void set_body(uint8_t* d, size_t s) {
-//         if (s > 256 - sizeof(Type*)) {
-//             return;
+//     void clear() {
+//         data.resize(0);
+//     }
+
+//     Header* const header_pointer() const {
+//         return (Header* const)data.data();
+//     }
+
+//     auto header() const {
+//         return *header_pointer();
+//     }
+
+//     void set_header(Header const& header) {
+//         *header_pointer() = header;
+//     }
+
+//     auto type() const {
+//         return header_pointer()->type;
+//     }
+
+//     auto set_type(MessageType type) {
+//         header_pointer()->type = type;
+//     }
+
+//     char* body() {
+//         return data.data() + sizeof(Header);
+//     }
+
+//     size_t body_size() const {
+//         return data.size() - sizeof(Header);
+//     }
+
+//     auto body_view() {
+//         return std::string_view(body(), body_size());
+//     }
+
+//     int set_body(void const* d, size_t s) {
+//         if (sizeof(Header) + s > MAX_MESSAGE_SIZE) {
+//             return 1;
 //         }
-//         memcpy(body, d, s);
+
+//         memset(body(), 0, body_size());
+//         data.resize(sizeof(Header) + s);
+//         memcpy(body(), d, s);
+//         return 0;
 //     }
 
+//     int set_body(std::basic_string_view<char> const& view) {
+//         if (sizeof(Header) + view.size() > MAX_MESSAGE_SIZE) {
+//             return 1;
+//         }
+
+//         memset(body(), 0, body_size());
+//         data.resize(sizeof(Header) + view.size());
+//         memcpy(body(), view.data(), view.size());
+//         return 0;
+//     }
+
+//     auto append_body(void const* d, size_t s) {
+//         if (data.size() + s > MAX_MESSAGE_SIZE) {
+//             return 1;
+//         }
+
+//         data.resize(sizeof(Header) + data.size() + s);
+//         memcpy(body() + data.size(), d, s);
+//         return 0;
+//     }
+
+//     auto append_body(std::basic_string_view<char> const& view) {
+//         if (data.size() + view.size() > MAX_MESSAGE_SIZE) {
+//             return 1;
+//         }
+
+//         data.resize(sizeof(Header) + data.size() + view.size());
+//         memcpy(body() + data.size(), view.data(), view.size());
+//         return 0;
+//     }
 // };
-
-// struct Message {
-//     enum class type : uint8_t {
-//         login = 65,
-//         text
-//     };
-//     struct Header {
-//         type type;
-//         uint32_t size;
-//     };
-//     std::vector<uint8_t> data = std::vector<uint8_t>(sizeof(Header));
-//     Header* header = (Header*)data.data();
-// };
-// struct Message {
-//     struct meta {
-//         message_type type;
-//     };
-//     meta meta;
-//     std::string body;
-
-//     std::array<io::const_buffer, 2> view() {
-//         return std::array<io::const_buffer, 2>{io::buffer(&meta, sizeof(Message::meta)), io::buffer(body)};
-//     }
-// };
-
-// struct Message {
-//     struct Header {
-//         message_type msg_type;
-//         uint32_t msg_size = 0;
-//     };
-//     Header header;
-//     std::vector<uint8_t> body;
-
-//     size_t size() const {
-//         return sizeof(Message::Header) + body.size();
-//     }
-
-//     friend std::ostream& operator<<(std::ostream& os, const Message& msg) {
-//         os << "ID: " << int(msg.header.msg_type) << " Size: " << msg.header.msg_size;
-//         return os;
-//     }
-
-//     template <typename DataType>
-//     friend Message& operator<<(Message& msg, const DataType& data) {
-//         static_assert(std::is_standard_layout<DataType>::value, "The data type is too complex to be pushed into a vector");
-
-//         size_t n = msg.body.size();
-//         msg.body.resize(msg.body.size() + sizeof(DataType));
-//         std::memcpy(msg.body.data() + n, &data, sizeof(DataType));
-//         msg.header.msg_size = msg.size();
-
-//         return msg;
-//     }
-
-//     template <typename DataType>
-//     friend Message& operator>>(Message& msg, const DataType& data) {
-//         static_assert(std::is_standard_layout<DataType>::value, "The data type is too complex to be pulled out of a vector");
-
-//         size_t n = msg.body.size() - sizeof(DataType);
-//         std::memcpy(&data, msg.body.data() + n, sizeof(DataType));
-//         msg.header.msg_size = msg.size();
-
-//         return msg;
-//     }
-//
-// };
-
-// #endif
