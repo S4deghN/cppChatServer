@@ -37,14 +37,13 @@ private:
     std::vector<std::thread> thr_vec;
 
 public:
-    Server(int threads = 1, tcp::endpoint&& endpoint = {}) : io_context(threads) , sessions_strand(io::make_strand(io_context))
+    Server(int threads, tcp::endpoint&& endpoint) : io_context(threads) , sessions_strand(io::make_strand(io_context))
         , pending_sessions_strand(io::make_strand(io_context))
         , ssl_context(io::ssl::context::tlsv13_server)
         , acceptor(io_context, std::move(endpoint))
     {
         init_ssl();
 
-        spdlog::info("Accepting connection on: {}:{}", acceptor.local_endpoint().address().to_string(), acceptor.local_endpoint().port());
         io::co_spawn(pending_sessions_strand, do_accept(acceptor), io::detached);
 
         spdlog::info("Threads: {}", threads);
@@ -65,9 +64,12 @@ public:
     }
 
     io::awaitable<void> do_accept(tcp::acceptor& acceptor) {
+        spdlog::info("Accepting connection on: {}:{}",
+                     acceptor.local_endpoint().address().to_string(),
+                     acceptor.local_endpoint().port());
         for (;;) {
             spdlog::info("Sessions : {}", sessions.size());
-            auto session = std::make_shared<PendingSession>( co_await acceptor.async_accept(io::use_awaitable), *this);
+            auto session = std::make_shared<PendingSession>(co_await acceptor.async_accept(io::use_awaitable), *this);
             pending_sessions.emplace(std::move(session));
         }
     }
@@ -77,24 +79,22 @@ class PendingSession : public std::enable_shared_from_this<PendingSession> {
 private:
     Server& server;
     io::ssl::stream<tcp::socket> ssl_socket;
-    tcp::socket& socket;
     std::string read_buffer;
     bool logged_in = false;
     std::string username;
 
 public:
-    PendingSession(tcp::socket&& socket, Server& server)
-        : server(server)
-        , ssl_socket(std::move(socket), server.ssl_context)
-        , socket(this->ssl_socket.next_layer()) {
+    PendingSession(tcp::socket&& socket, Server& server) :
+        server(server),
+        ssl_socket(std::move(socket), server.ssl_context)
+    {
         io::co_spawn(server.io_context, handshake(), io::detached);
     }
 
     io::awaitable<void> handshake() {
-        socket.set_option(tcp::no_delay(true));
+        ssl_socket.next_layer().set_option(tcp::no_delay(true));
 
-        auto [err] = co_await ssl_socket.async_handshake(io::ssl::stream_base::server,
-                                                         io::as_tuple(io::use_awaitable));
+        auto [err] = co_await ssl_socket.async_handshake(io::ssl::stream_base::server, io::as_tuple(io::use_awaitable));
         if (err) {
             spdlog::error("handshake: {}", err.what());
             close();
@@ -106,8 +106,7 @@ public:
 
     io::awaitable<void> authenticate() {
         for (;;) {
-            auto [err, n] = co_await io::async_read_until(ssl_socket, io::dynamic_buffer(read_buffer),
-                                                          '\n', io::as_tuple(io::use_awaitable));
+            auto [err, n] = co_await io::async_read_until(ssl_socket, io::dynamic_buffer(read_buffer), '\n', io::as_tuple(io::use_awaitable));
             if (err) {
                 if (err == io::error::operation_aborted) {
                     co_return;
@@ -132,10 +131,12 @@ public:
 
             // clang-format off
             io::dispatch(server.sessions_strand,
-                 [session = std::make_shared<Session>(std::move(ssl_socket), server), self = shared_from_this()] {
+                [session = std::make_shared<Session>(std::move(ssl_socket), server), self = shared_from_this()] {
                      spdlog::info("implacing session in to sessions list");
                      self->server.sessions.emplace(std::move(session));
-             });
+                }
+            );
+
             io::dispatch(server.pending_sessions_strand, [self = shared_from_this()] {
                 spdlog::info("removing pending session from pending sessions list");
                 self->server.pending_sessions.erase(self);
@@ -146,9 +147,8 @@ public:
     }
 
     void close() {
-        socket.close();
-        io::dispatch(server.pending_sessions_strand,
-                     [self = shared_from_this()] { self->server.pending_sessions.erase(self); });
+        ssl_socket.next_layer().close();
+        io::dispatch(server.pending_sessions_strand, [self = shared_from_this()] { self->server.pending_sessions.erase(self); });
         spdlog::error("Pending session closed!");
     }
 };
@@ -157,44 +157,25 @@ class Session : public std::enable_shared_from_this<Session> {
 private:
     Server& server;
     io::ssl::stream<tcp::socket> ssl_socket;
-    tcp::socket& socket;
     safe_deque<std::string> write_q;
     std::string read_buffer;
     io::steady_timer timer;
-    bool logged_in = false;
-    std::string username;
 
 public:
     Session(io::ssl::stream<tcp::socket>&& ssl_socket, Server& server)
         : server(server)
         , ssl_socket(std::move(ssl_socket))
-        , socket(this->ssl_socket.next_layer())
-        , timer(server.io_context) {
+        , timer(server.io_context)
+    {
         timer.expires_at(std::chrono::steady_clock::time_point::max());
 
-        // io::co_spawn(server.io_context, handshake(), io::detached);
         io::co_spawn(server.io_context, do_read(), io::detached);
         io::co_spawn(server.io_context, do_write(), io::detached);
     }
 
-    // io::awaitable<void> handshake() {
-    //     socket.set_option(tcp::no_delay(true));
-
-    //     auto [err] = co_await ssl_socket.async_handshake(io::ssl::stream_base::server,
-    //                                                      io::as_tuple(io::use_awaitable));
-    //     if (err) {
-    //         spdlog::error("handshake: {}", err.what());
-    //         close();
-    //         co_return;
-    //     }
-    //     io::co_spawn(server.io_context, do_read(), io::detached);
-    //     io::co_spawn(server.io_context, do_write(), io::detached);
-    // }
-
     io::awaitable<void> do_read() {
         for (;;) {
-            auto [err, n] = co_await io::async_read_until(ssl_socket, io::dynamic_buffer(read_buffer),
-                                                          '\n', io::as_tuple(io::use_awaitable));
+            auto [err, n] = co_await io::async_read_until(ssl_socket, io::dynamic_buffer(read_buffer), '\n', io::as_tuple(io::use_awaitable));
             if (err) {
                 if (err == io::error::operation_aborted) {
                     co_return;
@@ -212,10 +193,14 @@ public:
     void dispatch_msg(Message const& msg) {
         switch (msg.type()) {
             case MessageType::text:
-                io::post(server.sessions_strand,
-                         [s = shared_from_this(), msg = std::move(msg)]() { s->post_msg(msg); });
+                // Post the full message
                 break;
-            case MessageType::login: break;
+            case MessageType::roll:
+                // Post roll result
+                break;
+            case MessageType::login:
+                // Ignore
+                break;
             default: break;
         }
     }
@@ -258,7 +243,7 @@ public:
     }
 
     void close() {
-        socket.close();
+        ssl_socket.next_layer().close();
         timer.cancel();
         io::dispatch(server.sessions_strand,
                      [self = shared_from_this()] { self->server.sessions.erase(self); });
