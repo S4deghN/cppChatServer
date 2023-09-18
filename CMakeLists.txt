@@ -11,7 +11,7 @@ project (chatServer)
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(spdlog REQUIRED)
 
-add_executable(server "src/server1.cpp")
+add_executable(server "src/server.cpp")
 add_executable(client "src/client.cpp")
 
 # target_compile_options(server PUBLIC -DBOOST_ASIO_ENABLE_HANDLER_TRACKING)

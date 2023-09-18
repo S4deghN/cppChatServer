@@ -16,6 +16,7 @@ enum class MessageErrorCode : uint8_t {
 enum class MessageType : uint8_t {
     login = 65,
     text,
+    roll,
     err
 };
 

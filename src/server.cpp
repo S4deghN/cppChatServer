@@ -58,6 +58,7 @@ public:
     }
 
     void init_ssl() {
+        Message x;
         ssl_context.set_options(io::ssl::context::tlsv13);
         ssl_context.use_certificate_chain_file("server.crt");
         ssl_context.use_private_key_file("server.key", io::ssl::context::pem);
@@ -212,9 +213,7 @@ public:
             }
 
             if (write_q.size()) {
-                auto [err, n] = co_await io::async_write(ssl_socket, io::buffer(write_q.front()),
-                                                         io::as_tuple(io::use_awaitable));
-
+                auto [err, n] = co_await io::async_write(ssl_socket, io::buffer(write_q.front()), io::as_tuple(io::use_awaitable));
                 write_q.pop_front();
 
                 if (err) {
