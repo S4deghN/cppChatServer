@@ -1,3 +1,4 @@
+#include <boost/asio/co_spawn.hpp>
 #if defined(__clang__)
     #define _LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS
 #endif
@@ -37,7 +38,9 @@ private:
     std::vector<std::thread> thr_vec;
 
 public:
-    Server(int threads, tcp::endpoint&& endpoint) : io_context(threads) , sessions_strand(io::make_strand(io_context))
+    Server(int threads, tcp::endpoint&& endpoint)
+        : io_context(threads)
+        , sessions_strand(io::make_strand(io_context))
         , pending_sessions_strand(io::make_strand(io_context))
         , ssl_context(io::ssl::context::tlsv13_server)
         , acceptor(io_context, std::move(endpoint))
@@ -58,7 +61,6 @@ public:
     }
 
     void init_ssl() {
-        Message x;
         ssl_context.set_options(io::ssl::context::tlsv13);
         ssl_context.use_certificate_chain_file("server.crt");
         ssl_context.use_private_key_file("server.key", io::ssl::context::pem);
@@ -97,7 +99,7 @@ public:
 
         auto [err] = co_await ssl_socket.async_handshake(io::ssl::stream_base::server, io::as_tuple(io::use_awaitable));
         if (err) {
-            spdlog::error("handshake: {}", err.what());
+            spdlog::error("{}: {}", __PRETTY_FUNCTION__, err.what());
             close();
             co_return;
         }
@@ -113,36 +115,31 @@ public:
                     co_return;
                 }
                 close();
-                spdlog::error("do_read: {}", err.what());
+                spdlog::error("{}: {}", __PRETTY_FUNCTION__, err.what());
                 co_return;
             }
 
             read_buffer.erase(0, n);
 
-            // Validate usernaem sent
-            //
-            // If valid: send confimation and create session
-            //
-            // If not valid: send error info and continue the waiting loop
+            // TODO:
+            // if (username is valid) {
+            //     send confirmation and create session
+            // } else {
+            //     send error info and continue the loop
+            // }
 
-            // for now we imagine it's vaid whatever it is
-
-            // Create a sessions object using this pending_sessions's socket
-            // and post a job for adding it to the sessions list
-
-            // clang-format off
             io::dispatch(server.sessions_strand,
                 [session = std::make_shared<Session>(std::move(ssl_socket), server), self = shared_from_this()] {
-                     spdlog::info("implacing session in to sessions list");
+                     spdlog::trace("implacing session in to sessions list");
                      self->server.sessions.emplace(std::move(session));
                 }
             );
 
             io::dispatch(server.pending_sessions_strand, [self = shared_from_this()] {
-                spdlog::info("removing pending session from pending sessions list");
+                spdlog::trace("removing pending session from pending sessions list");
                 self->server.pending_sessions.erase(self);
             });
-            // clang-format on
+
             co_return;
         }
     }
@@ -150,7 +147,7 @@ public:
     void close() {
         ssl_socket.next_layer().close();
         io::dispatch(server.pending_sessions_strand, [self = shared_from_this()] { self->server.pending_sessions.erase(self); });
-        spdlog::error("Pending session closed!");
+        spdlog::info("Pending session closed!");
     }
 };
 
@@ -182,27 +179,12 @@ public:
                     co_return;
                 }
                 close();
-                spdlog::error("do_read: {}", err.what());
+                spdlog::error("{}: {}", __PRETTY_FUNCTION__, err.what());
                 co_return;
             }
 
             post_msg(read_buffer);
             read_buffer.erase(0, n);
-        }
-    }
-
-    void dispatch_msg(Message const& msg) {
-        switch (msg.type()) {
-            case MessageType::text:
-                // Post the full message
-                break;
-            case MessageType::roll:
-                // Post roll result
-                break;
-            case MessageType::login:
-                // Ignore
-                break;
-            default: break;
         }
     }
 
@@ -220,7 +202,7 @@ public:
                     if (err == io::error::operation_aborted) {
                         co_return;
                     }
-                    spdlog::error("write: {}", err.what());
+                    spdlog::error("{}: {}", __PRETTY_FUNCTION__, err.what());
                     close();
                     co_return;
                 }
@@ -244,19 +226,16 @@ public:
     void close() {
         ssl_socket.next_layer().close();
         timer.cancel();
-        io::dispatch(server.sessions_strand,
-                     [self = shared_from_this()] { self->server.sessions.erase(self); });
-        spdlog::error("Session closed!");
+        io::dispatch(server.sessions_strand, [self = shared_from_this()] { self->server.sessions.erase(self); });
+        spdlog::info("Session closed!");
     }
 };
 
 int main(int argc, char* argv[]) {
     spdlog::set_pattern("[%H:%M:%S:%f] [%t] [%^%l%$]\t%v");
-    spdlog::set_level(spdlog::level::info);
+    spdlog::set_level(spdlog::level::trace);
 
     int thread_count = argc > 1 ? std::atoi(argv[1]) : 1;
-
-    spdlog::info("constructing server");
     Server server(thread_count, tcp::endpoint(tcp::v4(), 55555));
 
     return 0;
