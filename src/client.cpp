@@ -1,4 +1,5 @@
-#include <boost/asio/write.hpp>
+#include <chrono>
+#include <ctime>
 #if defined(__clang__)
     #define _LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS
 #endif
@@ -10,19 +11,15 @@
 #include <boost/asio/ssl.hpp>
 #include <chrono>
 #include <coroutine>
-#include <cstring>
 #include <ctime>
 #include <iomanip>
 #include <iostream>
-#include <map>
-#include <stdexcept>
+#include <sstream>
 #include <string>
-#include <string_view>
-
-#include "message.h"
 
 namespace io = boost::asio;
 using tcp = io::ip::tcp;
+using ssl_socket = io::ssl::stream<tcp::socket&>;
 
 std::string time_in_string() {
     using namespace std::chrono;
@@ -43,7 +40,7 @@ std::string time_in_string() {
     std::ostringstream oss;
 
     oss << std::put_time(&bt, "%H:%M:%S");  // HH:MM:SS
-    oss << '.' << std::setfill('0') << std::setw(6) << ms.count() << '\t';
+    oss << '.' << std::setfill('0') << std::setw(6) << ms.count();
 
     return oss.str();
 }
@@ -53,23 +50,20 @@ private:
     io::io_context& io_context;
     tcp::socket socket;
     tcp::endpoint endpoint;
+    ssl_socket ssl_socket;
     io::ssl::context& ssl_context;
-    io::ssl::stream<tcp::socket&> ssl_socket;
     io::posix::stream_descriptor input_descriptor;
     io::posix::stream_descriptor output_descriptor;
 
-    std::string username;
-
 public:
-    Client(io::io_context& io_context, io::ssl::context& ssl_context, tcp::socket&& socket,
-           tcp::endpoint&& endpoint)
-        : io_context(io_context)
-        , socket(std::move(socket))
-        , endpoint(std::move(endpoint))
-        , ssl_context(ssl_context)
-        , ssl_socket(this->socket, ssl_context)
-        , input_descriptor(io_context, dup(STDIN_FILENO))
-        , output_descriptor(io_context, dup(STDOUT_FILENO)) {
+    Client(io::io_context& io_context, io::ssl::context& ssl_context, tcp::socket&& socket, tcp::endpoint&& endpoint) :
+        io_context(io_context),
+        socket(std::move(socket)),
+        endpoint(std::move(endpoint)),
+        ssl_context(ssl_context),
+        ssl_socket(this->socket, ssl_context),
+        input_descriptor(io_context, dup(STDIN_FILENO)),
+        output_descriptor(io_context, dup(STDOUT_FILENO)) {
         io::co_spawn(io_context, connect(), io::detached);
     }
 
@@ -84,121 +78,66 @@ public:
     }
 
     io::awaitable<void> handshake() {
-        socket.set_option(tcp::no_delay(true));
-
-        auto [err] = co_await ssl_socket.async_handshake(io::ssl::stream_base::client,
-                                                         io::as_tuple(io::use_awaitable));
+        auto [err] = co_await ssl_socket.async_handshake(io::ssl::stream_base::client, io::as_tuple(io::use_awaitable));
         if (err) {
             spdlog::error("handshake: {}", err.what());
-            co_return;
         }
 
         spdlog::info("Connected!");
         co_spawn(io_context, do_read_stdio(), io::detached);
         co_spawn(io_context, do_read_socket(), io::detached);
-
-        // io::co_spawn(io_context, login(), io::detached);
     }
 
-    // io::awaitable<void> login() {
-    //     // Read username from console blockingly.
-    //     io::write(output_descriptor, io::buffer("Please enter your username:\n"));
-    //     std::string username;
-    //     io::read_until(input_descriptor, io::dynamic_buffer(username, 15), '\n');
-
-    //     // Send username to server asynchronously.
-    //     auto [err, n] =
-    //         co_await io::async_write(ssl_socket, io::buffer(username), io::as_tuple(io::use_awaitable));
-    //     if (err) {
-    //         spdlog::error("Sending username: {}", err.what());
-    //         close();
-    //         co_return;
-    //     }
-
-    //     // Get the confirmation message from server
-    //     std::string answer;
-    //     auto [errr, nn] = co_await io::async_read_until(ssl_socket, io::dynamic_buffer(answer), '\n',
-    //                                                     io::as_tuple(io::use_awaitable));
-    //     if (errr) {
-    //         spdlog::error("Receiving username confirmation: {}", err.what());
-    //         close();
-    //         co_return;
-    //     }
-
-    //     if (answer.substr(0, 2) == "OK") {
-    //         spdlog::info("you can chat now! the answer: \"{}\"", answer);
-    //         co_spawn(io_context, do_read_stdio(), io::detached);
-    //         co_spawn(io_context, do_read_socket(), io::detached);
-    //     } else {
-    //         spdlog::info("whoops! please try agian. the answer: \"{}\". size: {}", answer,
-    //                      answer.size());
-    //         for (auto const& c : answer) {
-    //             spdlog::info("char: {}", (uint8_t)c);
-    //         }
-    //         io::co_spawn(io_context, login(), io::detached);
-    //     }
-    // }
-
     io::awaitable<void> do_read_stdio() {
-        for (std::string line;;) {
-            auto [err, n] = co_await boost::asio::async_read_until(
-                input_descriptor, io::dynamic_buffer(line, 256), '\n', io::as_tuple(io::use_awaitable));
+        for (std::string read_buff;;) {
+            auto [err, n] = co_await boost::asio::async_read_until(input_descriptor, io::dynamic_buffer(read_buff),
+                                                                   '\n', io::as_tuple(io::use_awaitable));
             if (err) {
                 spdlog::error("do_read_stdio: {}", err.what());
                 co_return;
             }
 
-            co_spawn(io_context, write_socket(line), io::detached);
-            line.clear();
+            co_spawn(io_context, write_socket(std::move(read_buff)), io::detached);
         }
     }
 
-    io::awaitable<void> write_socket(std::string msg) {
-        auto [err, n] =
-            co_await io::async_write(ssl_socket, io::buffer(msg), io::as_tuple(io::use_awaitable));
-        if (err) {
-            spdlog::error("write_socket: {}", err.what());
-            close();
-            co_return;
-        }
-    }
+    io::awaitable<void> write_stdio(std::string msg) {
+        std::string str = time_in_string();
+        str.append(": ");
+        str.append(msg);
 
-    io::awaitable<void> do_read_socket() {
-        for (std::string msg;;) {
-            auto [err, n] = co_await io::async_read_until(ssl_socket, io::dynamic_buffer(msg), '\n',
-                                                          io::as_tuple(io::use_awaitable));
-            if (err) {
-                spdlog::error("do_read_socket: {}", err.what());
-                close();
-                co_return;
-            }
-
-            // spdlog::trace(
-            //     "do_read_socket -> type: {}, body_size: {}, data_size: {}, last byte: {}, first "
-            //     "byte: {}",
-            //     (int)msg.type(), msg.body_size(), msg.data.size(), msg.data.back(), msg.data.front());
-            //
-
-            std::string str(time_in_string());
-            str.append(msg);
-            msg.erase(0, n);
-
-            io::write(output_descriptor, io::buffer(str));
-            // co_spawn(io_context, write_stdio(std::move(str)), io::detached);
-            // io::write(output_descriptor, io::buffer(str));
-        }
-    }
-
-    io::awaitable<void> write_stdio(std::string&& msg) {
-        auto [err, n] = co_await io::async_write(output_descriptor, io::buffer(msg),
-                                                 io::as_tuple(io::use_awaitable));
+        auto [err, n] = co_await io::async_write(output_descriptor, io::buffer(str), io::as_tuple(io::use_awaitable));
         if (err) {
             spdlog::error("write_stdio: {}", err.what());
             co_return;
         }
     }
 
-    void close() {
+    io::awaitable<void> do_read_socket() {
+        for (std::string read_buff;;) {
+            auto [err, n] = co_await io::async_read_until(ssl_socket, io::dynamic_buffer(read_buff, 512), '\n',
+                                                          io::as_tuple(io::use_awaitable));
+            if (err) {
+                spdlog::error("do_read_socket: {}", err.what());
+                terminate();
+                co_return;
+            }
+
+            spdlog::info("{} bytes: {}", n, read_buff.substr(0, n - 1));
+            co_spawn(io_context, write_stdio(std::move(read_buff)), io::detached);
+        }
+    }
+
+    io::awaitable<void> write_socket(std::string msg) {
+        auto [err, n] = co_await io::async_write(ssl_socket, io::buffer(msg), io::as_tuple(io::use_awaitable));
+        if (err) {
+            spdlog::error("write_socket: {}", err.what());
+            terminate();
+            co_return;
+        }
+    }
+
+    void terminate() {
         socket.close();
         io_context.stop();
         spdlog::error("Connection closed due to an error!");
@@ -207,20 +146,15 @@ public:
 
 int main() {
     spdlog::set_pattern("[%H:%M:%S:%f] [%^%l%$]\t%v");
-    spdlog::set_level(spdlog::level::info);
+    spdlog::set_level(spdlog::level::err);
 
     io::io_context io_context;
     io::ssl::context ssl_context(io::ssl::context::tlsv13_client);
-
     ssl_context.set_options(io::ssl::context::tlsv13);
-    ssl_context.load_verify_file("server.crt");
+    ssl_context.load_verify_file("../data/server.crt");
     ssl_context.set_verify_mode(io::ssl::context::verify_peer);
 
     Client client(io_context, ssl_context, tcp::socket(io_context), tcp::endpoint(tcp::v4(), 55555));
-
-    io::signal_set signals(io_context, SIGINT, SIGTERM);
-    signals.async_wait([&](auto, auto) { io_context.stop(); });
-
     io_context.run();
 
     return 0;

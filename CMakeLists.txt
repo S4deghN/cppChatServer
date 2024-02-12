@@ -3,8 +3,7 @@ cmake_minimum_required (VERSION 3.10)
 set(CMAKE_EXPORT_COMPILE_COMMANDS 1)
 set(CMAKE_C_COMPILER "clang")
 set(CMAKE_CXX_COMPILER "clang++")
-set(CMAKE_CXX_FLAGS "-std=c++2b -stdlib=libc++ -fcoroutines-ts -O3")
-set(CMAKE_LINK_LIBRARY_FLAG "-lc++ -lc++abi -lm -lc -lgcc_s -lgcc")
+set(CMAKE_CXX_FLAGS "-std=c++2b -stdlib=libc++ -O2 -fsanitize=undefined,address -ggdb")
 
 project (chatServer)
 
@@ -16,9 +15,6 @@ add_executable(client "src/client.cpp")
 
 # target_compile_options(server PUBLIC -DBOOST_ASIO_ENABLE_HANDLER_TRACKING)
 target_compile_options(client PUBLIC )
-
-# target_link_options(server PUBLIC -lc++ -lc++abi -lm -lc -lgcc_s -lgcc)
-# target_link_options(client PUBLIC -lc++ -lc++abi -lm -lc -lgcc_s -lgcc)
 
 target_precompile_headers(server PUBLIC ${Boost_INCLUDE_DIR}/boost/asio.hpp)
 target_precompile_headers(client PUBLIC ${Boost_INCLUDE_DIR}/boost/asio.hpp)
