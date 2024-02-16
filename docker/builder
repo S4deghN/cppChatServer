@@ -2,7 +2,7 @@
 
 set -e
 
-name="chat"
+name="zero_chat"
 base_name=$(basename $0)
 dir_name=$(dirname $0)
 
@@ -17,11 +17,11 @@ elif [[ -z "$(docker ps -a --quiet -f name=$name -f status=running)" ]]; then
     docker start $name
 fi
 
-if [[ -z "$(docker exec -w /root/$name/docker $name bash -c 'ls build 2>/dev/null')" ]] || [[ "$base_name" == "docker_build" ]]; then
+if [[ -z "$(docker exec -w /root/$name/docker $name bash -c 'ls build 2>/dev/null')" ]] || [[ "$base_name" == "builder" ]]; then
     docker exec -it -w /root/$name/docker $name bash -c 'cmake .. -B build && cd build && make -j2'
 fi
 
-if [[ "$base_name" != "docker_build" ]]; then
-    threads=${1:-"1"}
+if [[ "$base_name" != "builder" ]]; then
+    threads=${1:-}
     docker exec -it -w /root/$name/docker $name ./build/$base_name $threads
 fi
