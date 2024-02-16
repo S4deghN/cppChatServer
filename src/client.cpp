@@ -1,6 +1,3 @@
-#include <boost/asio/detached.hpp>
-#include <chrono>
-#include <ctime>
 #if defined(__clang__)
     #define _LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS
 #endif
@@ -10,13 +7,14 @@
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
-#include <chrono>
 #include <coroutine>
-#include <ctime>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <chrono>
+#include <ctime>
+#include <deque>
 
 namespace io = boost::asio;
 using tcp = io::ip::tcp;
@@ -53,12 +51,15 @@ private:
     ssl_socket ssl_socket;
     tcp::endpoint endpoint;
 
+    std::string stdio_read_buffer;
+    std::string socket_read_buffer;
+    std::deque<std::string> stdio_write_q;
+    std::deque<std::string> socket_write_q;
+    io::steady_timer stdio_write_timer;
+    io::steady_timer socket_write_timer;
+
     io::posix::stream_descriptor input_descriptor;
     io::posix::stream_descriptor output_descriptor;
-
-    std::string stdio_read_buffer;
-    std::string stdio_write_buffer;
-    std::string socket_read_buffer;
 
 public:
     Client(io::io_context& io_context, io::ssl::context& ssl_context, tcp::socket&& socket, tcp::endpoint&& endpoint) :
@@ -66,8 +67,14 @@ public:
         ssl_context(ssl_context),
         ssl_socket(std::move(socket), ssl_context),
         endpoint(std::move(endpoint)),
+        stdio_write_timer(io_context),
+        socket_write_timer(io_context),
         input_descriptor(io_context, dup(STDIN_FILENO)),
         output_descriptor(io_context, dup(STDOUT_FILENO)) {
+
+        stdio_write_timer.expires_at(std::chrono::steady_clock::time_point::max());
+        socket_write_timer.expires_at(std::chrono::steady_clock::time_point::max());
+
     }
 
     io::awaitable<void> connect() {
@@ -89,48 +96,70 @@ public:
         spdlog::info("Connected!");
         co_spawn(io_context, read_stdio(), io::detached);
         co_spawn(io_context, read_socket(), io::detached);
+        co_spawn(io_context, write_stdio(), io::detached);
+        co_spawn(io_context, write_socket(), io::detached);
     }
 
     io::awaitable<void> read_stdio() {
         for (;;)
         {
-            try
-            {
-                auto n = co_await boost::asio::async_read_until(input_descriptor, io::dynamic_buffer(stdio_read_buffer, 254), '\n', io::use_awaitable);
-                co_spawn(io_context, write_socket(stdio_read_buffer), io::detached);
-                stdio_read_buffer.erase(0, n);
-            }
-            catch (std::exception& err)
-            {
-                spdlog::error("stdio_to_socket: {}", err.what());
+            auto [err, n] = co_await boost::asio::async_read_until(input_descriptor, io::dynamic_buffer(stdio_read_buffer, 254), '\n', io::as_tuple(io::use_awaitable));
+            if (err) {
+                spdlog::error("read_stdio: {}", err.what());
                 close();
             }
+            socket_write_q.push_back(stdio_read_buffer.substr(0, n));
+            socket_write_timer.cancel_one();
+            stdio_read_buffer.erase(0, n);
         }
     }
 
-    io::awaitable<void> write_socket(std::string msg) {
-        co_await io::async_write(ssl_socket, io::buffer(msg), io::use_awaitable);
+    io::awaitable<void> write_socket() {
+        for (;;) {
+            if (!ssl_socket.next_layer().is_open()) {
+                co_return;
+            }
+            if (!socket_write_q.empty()) {
+                auto [err, n] = co_await io::async_write(ssl_socket, io::buffer(socket_write_q.front()), io::as_tuple(io::use_awaitable));
+                if (err) {
+                    spdlog::error("write_socket: {}", err.what());
+                    close();
+                }
+                socket_write_q.pop_front();
+            } else {
+                auto [err] = co_await socket_write_timer.async_wait(io::as_tuple(io::use_awaitable));
+            }
+        }
     }
 
     io::awaitable<void> read_socket() {
         for (;;)
         {
-            try
-            {
-                auto n = co_await io::async_read_until(ssl_socket, io::dynamic_buffer(socket_read_buffer, 254), '\n', io::use_awaitable);
-                co_spawn( io_context, write_stdio(std::move(time_in_string().append(socket_read_buffer))), io::detached);
-                socket_read_buffer.erase(0, n);
-            }
-            catch (std::exception& err)
-            {
-                spdlog::error("socket_to_stdio: {}", err.what());
+            auto [err, n] = co_await io::async_read_until(ssl_socket, io::dynamic_buffer(socket_read_buffer, 254), '\n', io::as_tuple(io::use_awaitable));
+            if (err) {
+                spdlog::error("read_socket: {}", err.what());
                 close();
-            }
+            } 
+
+            stdio_write_q.push_back(time_in_string().append(socket_read_buffer.substr(0, n)));
+            stdio_write_timer.cancel_one();
+            socket_read_buffer.erase(0, n);
         }
     }
 
-    io::awaitable<void> write_stdio(std::string&& msg) {
-        co_await io::async_write(output_descriptor, io::buffer(msg), io::use_awaitable);
+    io::awaitable<void> write_stdio() {
+        for (;;) {
+            if (!stdio_write_q.empty()) {
+                auto [err, n] = co_await io::async_write(output_descriptor, io::buffer(stdio_write_q.front()), io::as_tuple(io::use_awaitable));
+                if (err) {
+                    spdlog::error("write_stdio: {}", err.what());
+                    close();
+                }
+                stdio_write_q.pop_front();
+            } else {
+                auto [err] = co_await stdio_write_timer.async_wait(io::as_tuple(io::use_awaitable));
+            }
+        }
     }
 
     void close() {
