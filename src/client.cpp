@@ -38,8 +38,8 @@ std::string time_in_string() {// {{{
 
     std::ostringstream oss;
 
-    oss << std::put_time(&bt, "%H:%M:%S");  // HH:MM:SS
-    oss << '.' << std::setfill('0') << std::setw(6) << ms.count() << ": ";
+    oss << '[' << std::put_time(&bt, "%H:%M:%S");  // HH:MM:SS
+    oss << '.' << std::setfill('0') << std::setw(6) << ms.count() << "] ";
 
     return oss.str();
 }// }}}
@@ -103,7 +103,7 @@ public:
     io::awaitable<void> read_stdio() {
         for (;;)
         {
-            auto [err, n] = co_await boost::asio::async_read_until(input_descriptor, io::dynamic_buffer(stdio_read_buffer, 254), '\n', io::as_tuple(io::use_awaitable));
+            auto [err, n] = co_await boost::asio::async_read_until(input_descriptor, io::dynamic_buffer(stdio_read_buffer), '\n', io::as_tuple(io::use_awaitable));
             if (err) {
                 spdlog::error("read_stdio: {}", err.what());
                 close();
@@ -135,12 +135,11 @@ public:
     io::awaitable<void> read_socket() {
         for (;;)
         {
-            auto [err, n] = co_await io::async_read_until(ssl_socket, io::dynamic_buffer(socket_read_buffer, 254), '\n', io::as_tuple(io::use_awaitable));
+            auto [err, n] = co_await io::async_read_until(ssl_socket, io::dynamic_buffer(socket_read_buffer), '\n', io::as_tuple(io::use_awaitable));
             if (err) {
                 spdlog::error("read_socket: {}", err.what());
                 close();
             } 
-
             stdio_write_q.push_back(time_in_string().append(socket_read_buffer.substr(0, n)));
             stdio_write_timer.cancel_one();
             socket_read_buffer.erase(0, n);

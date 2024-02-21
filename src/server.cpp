@@ -69,6 +69,7 @@ public:
     std::string read_buffer;
     safe_deque<std::string> write_q;
     io::strand<io::any_io_executor> io_strand;
+    std::string username;
 
     Session(tcp::socket&& socket, Server& server)
         : server(server)
@@ -88,20 +89,47 @@ public:
             co_return;
         }
 
-        io::dispatch(server.sessions_strand, [self = shared_from_this()] { self->server.sessions.emplace(self); });
-
-        io::co_spawn(io_strand, [self = shared_from_this()] { return self->do_read(); }, io::detached);
+        io::co_spawn(io_strand, [self = shared_from_this()] { return self->login(); }, io::detached);
         io::co_spawn(io_strand, [self = shared_from_this()] { return self->do_write(); }, io::detached);
+    }
 
-        // for (auto const& session : server.sessions) {
-        //     spdlog::info("Session : {}, refs: {}", (size_t)session.get(), session.use_count());
-        // }
+    io::awaitable<void> login() {
+        write("[server] in order to send or receive any messages use:\n`/login <username>`\n");
+
+        for(;;) {
+            auto [err, n] = co_await io::async_read_until(ssl_socket, io::dynamic_buffer(read_buffer), '\n',
+                                              io::as_tuple(io::bind_executor(io_strand, io::use_awaitable)));
+            if (err) {
+                on_error(err);
+                co_return;
+            }
+
+            if (read_buffer[0] == '/') {
+                auto end = read_buffer.find(' ');
+                if (end != read_buffer.npos && read_buffer.substr(1, end - 1) == "login") {
+                    username = read_buffer.substr(end + 1, n - 1 - (end + 1)) + ": ";
+                    read_buffer.erase(0, n);
+
+                    io::dispatch(server.sessions_strand, [self = shared_from_this()] { self->server.sessions.emplace(self); });
+                    io::co_spawn(io_strand, [self = shared_from_this()] { return self->do_read(); }, io::detached);
+
+                    write("[server] logged in as: " + username + "\n");
+                    co_return;
+                } else {
+                    write("[server] invalid command!\n");
+                }
+            } else {
+                write("[server] log in before sending any messages!\n");
+            }
+
+            read_buffer.erase(0, n);
+        }
     }
 
     io::awaitable<void> do_read() {
         for (;;) {
             auto [err, n] =
-                co_await io::async_read_until(ssl_socket, io::dynamic_buffer(read_buffer, 254), '\n',
+                co_await io::async_read_until(ssl_socket, io::dynamic_buffer(read_buffer), '\n',
                                               io::as_tuple(io::bind_executor(io_strand, io::use_awaitable)));
             if (err) {
                 on_error(err);
@@ -111,7 +139,7 @@ public:
             // spdlog::info("{} bytes: {}", n, read_buffer.substr(0, n - 1));
 
             io::dispatch(server.sessions_strand,
-                    [self = shared_from_this(), msg = read_buffer.substr(0, n)] { self->server.post_msg(msg); });
+                    [self = shared_from_this(), msg = username + read_buffer.substr(0, n)] { self->server.post_msg(msg); });
             read_buffer.erase(0, n);
         }
     }
@@ -135,6 +163,11 @@ public:
         }
     }
 
+    void write(const std::string& msg) {
+        write_q.push_back(msg);
+        timer.cancel_one();
+    }
+
     void on_error_with_info(boost::system::error_code err, const char* func) {
         if (err == io::error::operation_aborted) {
             return;
@@ -149,8 +182,7 @@ public:
 
 void Server::post_msg(std::string const& msg) {
     for (auto const& session : sessions) {
-        session->write_q.push_back(msg);
-        session->timer.cancel_one();
+        session->write(msg);
     }
 }
 
