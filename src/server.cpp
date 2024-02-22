@@ -15,6 +15,7 @@
 #include <unordered_set>
 
 #include "safe_deque.h"
+#include "message.h"
 
 namespace io = boost::asio;
 using tcp = io::ip::tcp;
@@ -24,6 +25,8 @@ class Session;
 using Session_ptr = std::shared_ptr<Session>;
 
 #define on_error(e) on_error_with_info(e, __PRETTY_FUNCTION__)
+#define double_case(a, b) ((int(a) << 8) | int(b))
+
 
 class Server {
 public:
@@ -58,18 +61,25 @@ public:
     }
 
     io::awaitable<void> do_accept(tcp::acceptor& acceptor);
-    void post_msg(std::string const& msg);
+    void post(const std::string& msg);
 };
 
 class Session : public std::enable_shared_from_this<Session> {
+    enum class State : uint8_t {
+        pending,
+        logged_in,
+    };
 public:
     Server& server;
     ssl_socket ssl_socket;
     io::steady_timer timer;
-    std::string read_buffer;
+    Message msg;
     safe_deque<std::string> write_q;
     io::strand<io::any_io_executor> io_strand;
+
     std::string username;
+    State state = State::pending;
+
 
     Session(tcp::socket&& socket, Server& server)
         : server(server)
@@ -89,58 +99,49 @@ public:
             co_return;
         }
 
-        io::co_spawn(io_strand, [self = shared_from_this()] { return self->login(); }, io::detached);
+        io::co_spawn(io_strand, [self = shared_from_this()] { return self->do_read(); }, io::detached);
         io::co_spawn(io_strand, [self = shared_from_this()] { return self->do_write(); }, io::detached);
-    }
-
-    io::awaitable<void> login() {
-        write("[server] in order to send or receive any messages use:\n`/login <username>`\n");
-
-        for(;;) {
-            auto [err, n] = co_await io::async_read_until(ssl_socket, io::dynamic_buffer(read_buffer), '\n',
-                                              io::as_tuple(io::bind_executor(io_strand, io::use_awaitable)));
-            if (err) {
-                on_error(err);
-                co_return;
-            }
-
-            if (read_buffer[0] == '/') {
-                auto end = read_buffer.find(' ');
-                if (end != read_buffer.npos && read_buffer.substr(1, end - 1) == "login") {
-                    username = read_buffer.substr(end + 1, n - 1 - (end + 1)) + ": ";
-                    read_buffer.erase(0, n);
-
-                    io::dispatch(server.sessions_strand, [self = shared_from_this()] { self->server.sessions.emplace(self); });
-                    io::co_spawn(io_strand, [self = shared_from_this()] { return self->do_read(); }, io::detached);
-
-                    write("[server] logged in as: " + username + "\n");
-                    co_return;
-                } else {
-                    write("[server] invalid command!\n");
-                }
-            } else {
-                write("[server] log in before sending any messages!\n");
-            }
-
-            read_buffer.erase(0, n);
-        }
     }
 
     io::awaitable<void> do_read() {
         for (;;) {
-            auto [err, n] =
-                co_await io::async_read_until(ssl_socket, io::dynamic_buffer(read_buffer), '\n',
-                                              io::as_tuple(io::bind_executor(io_strand, io::use_awaitable)));
-            if (err) {
+            try {
+                size_t n;
+                n = co_await io::async_read(ssl_socket, io::buffer(msg.head), io::bind_executor(io_strand, io::use_awaitable));
+                msg.body.resize(msg.body_size);
+                n = co_await io::async_read(ssl_socket, io::buffer(msg.body), io::bind_executor(io_strand, io::use_awaitable));
+            } catch (const boost::system::error_code& err) {
                 on_error(err);
                 co_return;
             }
+            dispatch(msg);
+        }
+    }
 
-            // spdlog::info("{} bytes: {}", n, read_buffer.substr(0, n - 1));
+    void dispatch(const Message& msg) {
+        switch (double_case(state, msg.type)) {
+            case double_case(State::pending, MessageType::text): {
+                write("[server] you have to log in\n");
+            } break;
 
-            io::dispatch(server.sessions_strand,
-                    [self = shared_from_this(), msg = username + read_buffer.substr(0, n)] { self->server.post_msg(msg); });
-            read_buffer.erase(0, n);
+            case double_case(State::pending, MessageType::login): {
+                state = State::logged_in;
+                username = msg.body.substr(0, msg.body.size() - 1) + ": ";
+                io::dispatch(server.sessions_strand, [self = shared_from_this()] { self->server.sessions.emplace(self); });
+                write("[server] logged in as " + username + "\n");
+            } break;
+
+            case double_case(State::logged_in, MessageType::text): {
+                io::dispatch(server.sessions_strand, [self = shared_from_this(), str_msg = username + msg.body] { self->server.post(str_msg); });
+            } break;
+
+            case double_case(State::logged_in, MessageType::login): {
+                write("[server] you are already logged in!\n");
+            } break;
+
+            default: {
+                write("[server] unsupported command\n");
+            } break;
         }
     }
 
@@ -163,8 +164,8 @@ public:
         }
     }
 
-    void write(const std::string& msg) {
-        write_q.push_back(msg);
+    void write(const std::string& str_msg) {
+        write_q.push_back(str_msg);
         timer.cancel_one();
     }
 
@@ -180,8 +181,8 @@ public:
     }
 };
 
-void Server::post_msg(std::string const& msg) {
-    for (auto const& session : sessions) {
+void Server::post(const std::string& msg) {
+    for (const auto& session : sessions) {
         session->write(msg);
     }
 }

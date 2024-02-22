@@ -16,6 +16,8 @@
 #include <ctime>
 #include <deque>
 
+#include "message.h"
+
 namespace io = boost::asio;
 using tcp = io::ip::tcp;
 using ssl_socket = io::ssl::stream<tcp::socket>;
@@ -54,7 +56,7 @@ private:
     std::string stdio_read_buffer;
     std::string socket_read_buffer;
     std::deque<std::string> stdio_write_q;
-    std::deque<std::string> socket_write_q;
+    std::deque<Message> socket_write_q;
     io::steady_timer stdio_write_timer;
     io::steady_timer socket_write_timer;
 
@@ -98,6 +100,10 @@ public:
         co_spawn(io_context, read_socket(), io::detached);
         co_spawn(io_context, write_stdio(), io::detached);
         co_spawn(io_context, write_socket(), io::detached);
+
+        stdio_write_q.push_back("use \"/<username>\" to log in\n");
+        stdio_write_timer.cancel_one();
+
     }
 
     io::awaitable<void> read_stdio() {
@@ -108,7 +114,19 @@ public:
                 spdlog::error("read_stdio: {}", err.what());
                 close();
             }
-            socket_write_q.push_back(stdio_read_buffer.substr(0, n));
+
+            Message msg;
+            if (stdio_read_buffer[0] == '/') {
+                msg.type = MessageType::login;
+                msg.body = stdio_read_buffer.substr(1, n - 1);
+                msg.body_size = msg.body.size();
+            } else {
+                msg.type = MessageType::text;
+                msg.body = stdio_read_buffer;
+                msg.body_size = msg.body.size();
+            }
+
+            socket_write_q.push_back(std::move(msg));
             socket_write_timer.cancel_one();
             stdio_read_buffer.erase(0, n);
         }
@@ -120,7 +138,10 @@ public:
                 co_return;
             }
             if (!socket_write_q.empty()) {
-                auto [err, n] = co_await io::async_write(ssl_socket, io::buffer(socket_write_q.front()), io::as_tuple(io::use_awaitable));
+                auto [err, n] = co_await io::async_write(
+                    ssl_socket,
+                    std::array{io::buffer(socket_write_q.front().head), io::buffer(socket_write_q.front().body)},
+                    io::as_tuple(io::use_awaitable));
                 if (err) {
                     spdlog::error("write_socket: {}", err.what());
                     close();
