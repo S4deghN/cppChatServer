@@ -2,7 +2,6 @@
     #define _LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS
 #endif
 
-#include <spdlog/spdlog.h>
 #include <unistd.h>
 
 #include <boost/asio.hpp>
@@ -15,6 +14,8 @@
 #include <chrono>
 #include <ctime>
 #include <deque>
+
+#include <spdlog/spdlog.h>
 
 #include "message.h"
 

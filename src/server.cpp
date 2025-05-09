@@ -1,18 +1,13 @@
-#include <boost/asio/bind_executor.hpp>
-#if defined(__clang__)
-    #define _LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS
-#endif
+// #if defined(__clang__)
+//     #define _LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS
+// #endif
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
-#include <boost/asio/error.hpp>
-#include <spdlog/spdlog.h>
-#include <algorithm>
-#include <coroutine>
-#include <deque>
-#include <mutex>
 #include <thread>
 #include <unordered_set>
+
+#include <spdlog/spdlog.h>
 
 #include "safe_deque.h"
 #include "message.h"
@@ -98,6 +93,7 @@ public:
             on_error(err);
             co_return;
         }
+
 
         io::co_spawn(io_strand, [self = shared_from_this()] { return self->do_read(); }, io::detached);
         io::co_spawn(io_strand, [self = shared_from_this()] { return self->do_write(); }, io::detached);
